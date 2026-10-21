@@ -48,8 +48,8 @@ jobs:
             exit 0
           fi
           sed -i "s/^mod_version=.*/mod_version=$version/" gradle.properties
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "N1troz"
+          git config user.email "195245835+CyberAyin@users.noreply.github.com"
           git commit -q -am "Release $version [skip ci]"
           # if main moved on, the newer run makes the release
           if git push -q origin HEAD:refs/heads/main; then
