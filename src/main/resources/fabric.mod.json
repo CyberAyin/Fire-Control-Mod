@@ -1,0 +1,24 @@
+{
+	"schemaVersion": 1,
+	"id": "firecontrol",
+	"version": "${version}",
+	"name": "FireControl",
+	"description": "Client-side helper for CubicMetre's Orbital Strike Cannons and Danda420's 360 pearl cannon. Pairs with your panel and cannon, sets a target in one command, enters the settings for you and counts down to impact.",
+	"authors": ["N1troz"],
+	"contributors": ["CubicMetre (Orbital Strike Cannon and fire control maths)", "CraftedEgg (original OSC Helper)", "Danda420 (360 Precision Ender Pearl Cannon and its calculator)"],
+	"contact": {
+		"homepage": "https://osc-fire-control.cubicmetre.net/"
+	},
+	"license": "GPL-3.0-or-later",
+	"icon": "assets/firecontrol/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["com.firecontrol.FireControlClient"]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "${mc_dep}",
+		"java": "${java_dep}",
+		"fabric-api": "*"
+	}
+}

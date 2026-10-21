@@ -1,0 +1,128 @@
+name: Build and release
+
+# Builds every supported version on each push and PR. Pushes to main also publish a release of
+# mod_version, or bump the patch number and commit it back if that version is already out.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Version
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      sha: ${{ steps.pick.outputs.sha }}
+      release: ${{ steps.pick.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Pick version
+        id: pick
+        run: |
+          base=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '\r ')
+          if ! [[ "$base" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::mod_version '$base' in gradle.properties isn't major.minor.patch (like 1.0.0)"
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+          while git rev-parse -q --verify "refs/tags/v$major.$minor.$patch" > /dev/null; do patch=$((patch + 1)); done
+          version="$major.$minor.$patch"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [ "$version" = "$base" ]; then
+            # not released yet, release this commit as is
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sed -i "s/^mod_version=.*/mod_version=$version/" gradle.properties
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "Release $version [skip ci]"
+          # if main moved on, the newer run makes the release
+          if git push -q origin HEAD:refs/heads/main; then
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main moved on since this push; the newer push's run releases it."
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build (MC ${{ matrix.minecraft }})
+    needs: version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - minecraft: 26.1.2
+            fabric_api: 0.155.3+26.1.2
+          - minecraft: "26.2"
+            fabric_api: 0.161.0+26.2
+          - minecraft: "26.3"
+            fabric_api: 0.164.0+26.3
+          - minecraft: 1.21.11
+            fabric_api: 0.141.6+1.21.11
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      # Java 25 also builds the 1.21.11 jar (--release 21)
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build
+        run: |
+          chmod +x gradlew
+          ./gradlew clean build -Pminecraft_version=${{ matrix.minecraft }} -Pfabric_api_version=${{ matrix.fabric_api }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firecontrol-mc${{ matrix.minecraft }}
+          path: build/libs/*.jar
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [version, build]
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: jars
+          merge-multiple: true
+
+      - name: Drop sources jars
+        run: rm -f jars/*-sources.jar
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          target_commitish: ${{ needs.version.outputs.sha }}
+          name: FireControl ${{ needs.version.outputs.version }}
+          files: jars/*.jar
+          fail_on_unmatched_files: true
+          generate_release_notes: true

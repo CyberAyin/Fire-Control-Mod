@@ -1,0 +1,123 @@
+plugins {
+	// 1.21.11 is obfuscated and needs the remap version of Loom
+	id 'net.fabricmc.fabric-loom' version "${loom_version}" apply false
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}" apply false
+}
+
+// other versions: gradlew build -Pminecraft_version=26.3 -Pfabric_api_version=0.164.0+26.3
+def obfuscated = project.minecraft_version.startsWith('1.')
+apply plugin: obfuscated ? 'net.fabricmc.fabric-loom-remap' : 'net.fabricmc.fabric-loom'
+// Java 21 for 1.21.11, 25 for 26.x
+def javaRelease = obfuscated ? 21 : 25
+
+version = "${project.mod_version}+mc${project.minecraft_version}"
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	// Loom adds the Minecraft and Fabric repositories
+}
+
+// version specific code is in src/compat/<line>
+def mcMinor = project.minecraft_version.tokenize('.-')[1].toInteger()
+def compatLine = project.findProperty('compat_line') ?: (obfuscated ? 'mc1_21_11' : mcMinor <= 1 ? 'mc26_1' : mcMinor == 2 ? 'mc26_2' : 'mc26_3')
+sourceSets.main.java.srcDir "src/compat/${compatLine}/java"
+
+// test mod, not part of the release jar: gradlew runE2e -Pschematics=<folder with the .litematic files>
+sourceSets {
+	e2e {
+		compileClasspath += main.compileClasspath + main.output
+		runtimeClasspath += main.runtimeClasspath + main.output
+		java.srcDir "src/compat/${compatLine}/e2e/java"
+	}
+}
+
+loom {
+	mods {
+		"firecontrol" {
+			sourceSet sourceSets.main
+		}
+		"firecontrol_e2e" {
+			sourceSet sourceSets.e2e
+		}
+	}
+
+	runs {
+		e2e {
+			client()
+			name = "FireControl E2E"
+			source sourceSets.e2e
+			runDir = obfuscated ? "run-e2e-${project.minecraft_version}" : "run-e2e"
+			vmArg "-Dfirecontrol.e2e=${project.findProperty('schematics') ?: 'missing'}"
+			programArgs "--username", "FCTester"
+		}
+		// gradlew runPearlE2e -Ppearlschem=<360_PearlCannon-Overworld.litematic>
+		pearlE2e {
+			client()
+			name = "FireControl Pearl E2E"
+			source sourceSets.e2e
+			runDir = obfuscated ? "run-pearl-${project.minecraft_version}" : "run-pearl"
+			vmArg "-Dfirecontrol.pearl=${project.findProperty('pearlschem') ?: 'missing'}"
+			programArgs "--username", "FCTester"
+		}
+		// gradlew runGroundE2e
+		groundE2e {
+			client()
+			name = "FireControl Ground E2E"
+			source sourceSets.e2e
+			runDir = obfuscated ? "run-ground-${project.minecraft_version}" : "run-ground"
+			vmArg "-Dfirecontrol.ground=true"
+			programArgs "--username", "FCTester"
+		}
+	}
+}
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	if (obfuscated) {
+		// Mojang mappings so the same sources build for 1.21.11 and 26.x
+		mappings loom.officialMojangMappings()
+		modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+		modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	} else {
+		implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+		implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+	}
+}
+
+processResources {
+	def version = project.version
+	def mcDep = "~" + project.minecraft_version
+	def javaDep = ">=" + javaRelease
+	inputs.property "version", version
+	inputs.property "mcDep", mcDep
+	inputs.property "javaDep", javaDep
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version, "mc_dep": mcDep, "java_dep": javaDep
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = javaRelease
+	it.options.encoding = "UTF-8"
+}
+
+java {
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.toVersion(javaRelease)
+	targetCompatibility = JavaVersion.toVersion(javaRelease)
+}
+
+jar {
+	def projectName = project.name
+	inputs.property "projectName", projectName
+
+	from("LICENSE") {
+		rename { "${it}_$projectName" }
+	}
+}

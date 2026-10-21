@@ -1,0 +1,13 @@
+{
+	"schemaVersion": 1,
+	"id": "firecontrol_e2e",
+	"version": "0.0.0",
+	"name": "FireControl E2E (dev only)",
+	"environment": "client",
+	"entrypoints": {
+		"client": ["com.firecontrol.e2e.E2EClient", "com.firecontrol.e2e.PearlE2E", "com.firecontrol.e2e.GroundE2E"]
+	},
+	"depends": {
+		"firecontrol": "*"
+	}
+}
