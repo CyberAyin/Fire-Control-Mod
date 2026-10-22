@@ -1,6 +1,7 @@
 package com.firecontrol.e2e;
 
 import com.firecontrol.Actions;
+import com.firecontrol.FireControl;
 import com.firecontrol.calc.CannonType;
 import com.firecontrol.calc.FireMode;
 import com.firecontrol.compat.Compat;
@@ -8,9 +9,12 @@ import com.firecontrol.data.Pairing;
 import com.firecontrol.data.Store;
 import com.firecontrol.gui.FireControlScreen;
 import com.firecontrol.gui.MoreScreen;
+import com.firecontrol.world.BlockScan;
 import com.firecontrol.world.GroundHeight;
+import com.firecontrol.world.PearlLayout;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 import java.util.function.BiFunction;
@@ -24,8 +28,10 @@ import net.minecraft.client.gui.screens.AccessibilityOnboardingScreen;
 import net.minecraft.client.gui.screens.TitleScreen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.FileUtil;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.LevelSettings;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.WorldOptions;
@@ -42,6 +48,7 @@ public class GroundE2E implements ClientModInitializer {
 	private int stepIndex = -1, ticksInStep, passes, fails;
 	private Pairing preset;
 	private GroundHeight.Check check;
+	private GroundHeight.Answer answer;
 	private int expected;
 
 	private record Step(String name, BiFunction<Minecraft, Integer, Boolean> run) {
@@ -224,6 +231,181 @@ public class GroundE2E implements ClientModInitializer {
 			return true;
 		});
 
+		step("to the Nether", (mc, t) -> {
+			if (t == 0) {
+				MinecraftServer server = mc.getSingleplayerServer();
+				server.execute(() -> {
+					run(server, "gamemode spectator @a");
+					run(server, "execute in minecraft:the_nether run tp @a 0 70 0");
+				});
+				return false;
+			}
+			return t > 400 && mc.level != null && Pairing.NETHER.equals(FireControl.dimensionId(mc.level));
+		});
+
+		step("seed alone gives the world's own Nether floors", (mc, t) -> {
+			ServerLevel nether = mc.getSingleplayerServer().getLevel(Level.NETHER);
+			Random r = new Random(11);
+			int same = 0, n = 300, floors = 0, several = 0, roofs = 0;
+			String firstDiff = "";
+			long start = System.nanoTime();
+			for (int i = 0; i < n; i++) {
+				int x = r.nextInt(60000) - 30000, z = r.nextInt(60000) - 30000;
+				int[] fromSeed = GroundHeight.seedNetherFloors(SEED, x, z), world = GroundHeight.worldNetherFloors(nether, x, z);
+				if (Arrays.equals(fromSeed, world)) same++;
+				else if (firstDiff.isEmpty()) firstDiff = x + " " + z + ": seed " + Arrays.toString(fromSeed) + ", world " + Arrays.toString(world);
+				floors += world.length;
+				if (world.length > 2) several++;
+				if (world.length > 0 && world[0] == 128) roofs++;
+			}
+			LOG.info("[GROUND] {} Nether columns in {} ms, {} floors, {} with several under the roof", n, (System.nanoTime() - start) / 1_000_000, floors, several);
+			check("seed Nether floors equal the world's (" + same + "/" + n + ")", same == n, firstDiff);
+			check("every column has the roof top (128) first", roofs == n, roofs + "/" + n);
+			check("most columns have a floor under the roof", floors - roofs > n / 2, floors + " floors");
+			return true;
+		});
+
+		// the real Nether also has carved tunnels, fungi, glowstone and basalt that the bare terrain doesn't
+		step("Nether floors fit the loaded blocks", (mc, t) -> {
+			BlockPos at = mc.player.blockPosition();
+			int tried = 0, same = 0, real = 0, wrongReal = 0, roofs = 0, shown = 0;
+			for (int dx = -96; dx <= 96; dx += 8) {
+				for (int dz = -96; dz <= 96; dz += 8) {
+					int x = at.getX() + dx, z = at.getZ() + dz;
+					if (!BlockScan.loaded(mc.level, x >> 4, z >> 4)) continue;
+					int[] loaded = GroundHeight.loadedNetherFloors(mc.level, x, z), fromSeed = GroundHeight.seedNetherFloors(SEED, x, z);
+					tried++;
+					if (loaded.length > 0 && loaded[0] == 128) roofs++;
+					int s = nearest(fromSeed, 64), w = nearest(GroundHeight.seedNetherFloors(SEED + 1, x, z), 64);
+					if (loaded.length > 0 && Math.abs(nearest(loaded, 64) - s) <= 1) same++;
+					if (Math.abs(nearest(loaded, w) - w) <= 1) wrongReal++;
+					if (Math.abs(nearest(loaded, s) - s) <= 1) real++;
+					else if (shown++ < 10) LOG.info("[GROUND]   {} {} {}: seed {} loaded {}", x, z, mc.level.getBiome(new BlockPos(x, s, z)).getRegisteredName(),
+							Arrays.toString(fromSeed), Arrays.toString(loaded));
+				}
+			}
+			LOG.info("[GROUND] loaded Nether: the seed's floor nearest y 64 is a real floor in {}/{} columns (a wrong seed's in {}), the nearest one in {}",
+					real, tried, wrongReal, same);
+			check("loaded Nether columns (" + tried + ")", tried >= 50, "");
+			check("loaded roof top is 128", roofs == tried, roofs + "/" + tried);
+			// tunnels, basalt, fungi and lava aren't in the bare terrain, so not all of them
+			check("the seed's floor near y 64 is mostly a real floor (" + real + "/" + tried + ", wrong seed " + wrongReal + ")",
+					real * 100 >= tried * 70 && real - wrongReal >= tried / 4, "");
+			return true;
+		});
+
+		step("Nether seed check accepts the right seed", (mc, t) -> {
+			if (t == 0) {
+				check = null;
+				GroundHeight.checkSeed(String.valueOf(SEED), c -> check = c);
+			}
+			if (check == null) return t > 600 && fail("no answer from the Nether seed check");
+			check("right seed matches the Nether", Boolean.TRUE.equals(check.match()) && check.preset() == null && check.message().contains("Nether"), check.toString());
+			return true;
+		});
+
+		for (String wrong : new String[] {"not the seed", String.valueOf(SEED + 1)}) {
+			step("Nether seed check rejects '" + wrong + "'", (mc, t) -> {
+				if (t == 0) {
+					check = null;
+					GroundHeight.checkSeed(wrong, c -> check = c);
+				}
+				if (check == null) return t > 600 && fail("no answer from the Nether seed check");
+				check("wrong seed '" + wrong + "' doesn't fit the Nether", Boolean.FALSE.equals(check.match()), check.toString());
+				return true;
+			});
+		}
+
+		step("Nether pearl cannon, x z far away: floor nearest the cannon, from the world", (mc, t) -> {
+			ServerLevel nether = mc.getSingleplayerServer().getLevel(Level.NETHER);
+			if (t == 0) {
+				Store.pairings().clear();
+				preset = new Pairing();
+				preset.name = "nether-pearl";
+				preset.dimension = Pairing.NETHER;
+				preset.cannonType = CannonType.PEARL.id;
+				preset.pearl = new PearlLayout(new BlockPos(0, 70, 0), 0, false);
+				preset.originX = 0;
+				preset.originY = 70;
+				preset.originZ = 0;
+				preset.passcodeSource = "default";
+				Store.pairings().add(preset);
+				Actions.select(preset);
+				expected = nearest(GroundHeight.worldNetherFloors(nether, 3000, -2000), 70);
+				client(mc, "firecontrol target 3000 -2000");
+				return false;
+			}
+			if (preset.targetX != 3000 && t < 400) return false;
+			check("nether pearl Y is the world's floor nearest the cannon (" + expected + ")", preset.targetX == 3000 && preset.targetZ == -2000 && preset.targetY == expected && preset.autoY,
+					preset.targetX + " " + preset.targetY + " " + preset.targetZ + " floors " + Arrays.toString(GroundHeight.worldNetherFloors(nether, 3000, -2000)));
+			return true;
+		});
+
+		step("Nether pearl cannon, x z far away: from the seed", (mc, t) -> {
+			if (t == 0) {
+				GroundHeight.seedEvenInSingleplayer = true;
+				Store.setSeed(String.valueOf(SEED));
+				GroundHeight.forget();
+				expected = nearest(GroundHeight.seedNetherFloors(SEED, -7000, 4100), 70);
+				client(mc, "firecontrol target -7000 4100");
+				return false;
+			}
+			if (preset.targetX != -7000 && t < 400) return false;
+			GroundHeight.Answer a = GroundHeight.forTarget(preset, -7000, 4100, Pairing.NETHER);
+			check("nether pearl Y from the seed (" + expected + ")", preset.targetX == -7000 && preset.targetY == expected && preset.autoY, preset.targetX + " " + preset.targetY);
+			check("labelled as a Nether floor or roof", a.ready() && a.label().startsWith("Nether"), String.valueOf(a));
+			return true;
+		});
+
+		step("Nether pearl cannon, overworld coordinates: floor at x/8 z/8", (mc, t) -> {
+			if (t == 0) {
+				answer = null;
+				expected = nearest(GroundHeight.seedNetherFloors(SEED, Math.floorDiv(-24001, 8), Math.floorDiv(16003, 8)), 70);
+				GroundHeight.whenReady(preset, -24001, 16003, "minecraft:overworld", a -> answer = a);
+			}
+			if (answer == null) return t > 400 && fail("no answer for overworld coordinates");
+			check("overworld coordinates use the Nether floor at x/8 z/8 (" + expected + ")", answer.ready() && answer.y() == expected, String.valueOf(answer));
+			Actions.setPearlTarget(preset, new BlockPos(-24001, answer.y(), 16003), "minecraft:overworld");
+			preset.autoY = true;
+			check("lands on that floor", preset.netherConversion() && preset.pearlLandY() == expected - 1, String.valueOf(preset.pearlLandY()));
+			preset.autoY = false;
+			check("a typed overworld Y keeps the cannon floor", preset.pearlLandY() == 69, String.valueOf(preset.pearlLandY()));
+			return true;
+		});
+
+		step("Nether pearl cannon, x z nearby: the loaded floor", (mc, t) -> {
+			BlockPos p = mc.player.blockPosition().offset(20, 0, -12);
+			if (t == 0) {
+				expected = nearest(GroundHeight.loadedNetherFloors(mc.level, p.getX(), p.getZ()), 70);
+				client(mc, "firecontrol target " + p.getX() + " " + p.getZ());
+				return false;
+			}
+			if (t < 5) return false;
+			check("nearby nether Y is the loaded floor nearest the cannon (" + expected + ")", preset.targetX == p.getX() && preset.targetY == expected && preset.autoY,
+					preset.targetX + " " + preset.targetY + " floors " + Arrays.toString(GroundHeight.loadedNetherFloors(mc.level, p.getX(), p.getZ())));
+			return true;
+		});
+
+		step("strike in the Nether, x z: the roof", (mc, t) -> {
+			if (t == 0) {
+				Store.pairings().clear();
+				preset = new Pairing();
+				preset.name = "nether-osc";
+				preset.dimension = Pairing.NETHER;
+				preset.setCannon(CannonType.MS, new BlockPos(0, 160, 0), 940, "manual");
+				Store.pairings().add(preset);
+				Actions.select(preset);
+				client(mc, "firecontrol target 5000 7000");
+				return false;
+			}
+			if (preset.targetX != 5000 && t < 400) return false;
+			GroundHeight.Answer a = GroundHeight.forTarget(preset, 5000, 7000, Pairing.NETHER);
+			check("nether strike Y is the roof top (128)", preset.targetX == 5000 && preset.targetY == 128 && preset.autoY, preset.targetX + " " + preset.targetY);
+			check("labelled as the roof", "Nether roof".equals(a.label()), String.valueOf(a));
+			GroundHeight.seedEvenInSingleplayer = false;
+			return true;
+		});
+
 		step("finish", (mc, t) -> {
 			LOG.info("[GROUND] RESULT: {} passed, {} failed", passes, fails);
 			Store.pairings().clear();
@@ -235,6 +417,17 @@ public class GroundE2E implements ClientModInitializer {
 
 	private static int worldHeight(ServerLevel level, int x, int z) {
 		return level.getChunkSource().getGenerator().getBaseHeight(x, z, Heightmap.Types.WORLD_SURFACE_WG, level, level.getChunkSource().randomState());
+	}
+
+	// floors are listed top down, so a tie goes to the higher one
+	private static int nearest(int[] floors, int y) {
+		int best = Integer.MIN_VALUE;
+		for (int f : floors) if (best == Integer.MIN_VALUE || Math.abs(f - y) < Math.abs(best - y)) best = f;
+		return best;
+	}
+
+	private static void run(MinecraftServer server, String command) {
+		server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), command);
 	}
 
 	private void check(String what, boolean ok, String detail) {

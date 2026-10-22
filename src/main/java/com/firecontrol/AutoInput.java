@@ -30,9 +30,9 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 
 // /firecontrol InputSettings: looks at each wrong button and presses it, walking along the panel if needed
 public final class AutoInput {
-	private static final int TIMEOUT_TICKS = 20 * 30;
-	private static final int STUCK_TICKS = 40;
-	private static final int MAX_ATTEMPTS = 3;
+	private static final int TIMEOUT_TICKS = 20 * 60;
+	private static final int STUCK_TICKS = 80;
+	private static final int MAX_ATTEMPTS = 4;
 	private static final int SETTLE_TICKS = 60;
 
 	private static boolean running;
@@ -277,8 +277,8 @@ public final class AutoInput {
 		for (int i : wrong) {
 			BlockPos b = pairing.panel.button(i);
 			if (b == null || attempts[i] >= MAX_ATTEMPTS) continue;
-			// not settled until the button is released again
-			if (Blocks2.isPressed(level.getBlockState(b)) || now - pressedAt[i] < 10) {
+			// not settled until the server has let the button go again
+			if (Blocks2.isPressed(level.getBlockState(b)) || now - pressedAt[i] < 10 + 2 * FireControl.lagTicks(Minecraft.getInstance())) {
 				waiting = true;
 				continue;
 			}

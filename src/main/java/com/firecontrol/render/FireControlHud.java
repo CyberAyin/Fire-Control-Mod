@@ -55,8 +55,9 @@ public final class FireControlHud {
 		double done = Mth.clamp(1 - left / total, 0, 1);
 		double mark = p.etaPayloadTicks > 0 && p.etaPayloadTicks < total ? p.etaPayloadTicks / total : -1;
 		if (p.isPearl()) {
-			if (left <= 0) panel(g, font, "✔ Landed", "", GREEN, -1, -1);
-			else panel(g, font, "➶ Landing in " + shortTime(left), "", CYAN, done, mark);
+			if (left > 0) panel(g, font, "➶ Landing in " + shortTime(left), "", CYAN, done, mark);
+			else if (Eta.waitsForLanding(p)) panel(g, font, "➶ Landing…", "", CYAN, 1, mark);
+			else panel(g, font, "✔ Landed", "", GREEN, -1, -1);
 		} else if (left <= 0) {
 			panel(g, font, "✸ IMPACT", "", (now / 5) % 2 == 0 ? RED : AMBER, -1, -1);
 		} else {
@@ -94,13 +95,14 @@ public final class FireControlHud {
 	}
 
 	private static void drawPearlStatus(Compat.Canvas g, Minecraft mc, Pairing p) {
-		if (!p.pearl.operatorArea().contains(mc.player.position())) return;
+		// a paused load stays in view while the cannon still works on it
+		if (!p.pearl.operatorArea().contains(mc.player.position()) && !PearlLoader.carriesOn()) return;
 		PearlCalculator.Solution s = PearlControl.solution();
 		Font font = mc.font;
 		if (PearlLoader.running()) {
 			if (!PearlLoader.title().isEmpty()) panel(g, font, PearlLoader.title(), PearlLoader.detail(), AMBER, PearlLoader.progress(), -1);
 		} else if (PearlLoader.paused()) {
-			panel(g, font, "Paused", "click Resume in chat", AMBER, PearlLoader.progress(), -1);
+			panel(g, font, "Paused", PearlLoader.carriesOn() ? "cannon still working · " + PearlLoader.timeLeft() : "click Resume in chat", AMBER, PearlLoader.progress(), -1);
 		} else if (p.fired) {
 			panel(g, font, "✔ Pearl sent", "set a new target in /firecontrol", GREEN, -1, -1);
 		} else if (s == null) {

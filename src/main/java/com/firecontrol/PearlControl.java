@@ -36,11 +36,16 @@ public final class PearlControl {
 	private static final boolean[] wallOpen = new boolean[4];
 	private static boolean holeOpen, cacheOn;
 	private static final int[] stacked = new int[4];
-	private static int stored, total, escaping;
+	private static int stored, total, escaping, making;
 	private static boolean wasReady;
 	private static int countedPearl = -1;
 	private static long launchCheckAt = -1;
 	private static int chargesAtThrow;
+	// game ticks a flying pearl waits per chunk the server has to load. Singleplayer: 1.5 over flat land,
+	// about 20 over new Nether terrain. Learned per server and dimension from each landing.
+	private static final double DEFAULT_CHUNK_WAIT = 6, DEFAULT_NETHER_CHUNK_WAIT = 12, MAX_CHUNK_WAIT = 60;
+	private static Pairing thrownFor;
+	private static double thrownFlight, thrownJumps;
 
 	private PearlControl() {
 	}
@@ -95,6 +100,9 @@ public final class PearlControl {
 		total = 0;
 		escaping = 0;
 		AABB storage = l.storage();
+		// the breezes' charges wait up top until the whole batch is through, then drop together
+		making = level.getEntities((Entity) null, new AABB(storage.minX, storage.maxY, storage.minZ, storage.maxX, l.bounds().maxY + 4, storage.maxZ),
+				PearlControl::isCharge).size();
 		BlockPos column = l.at(0, 0, 0);
 		// below the breeze chambers but outside the cannon = flying out. A stack drifting off
 		// diagonally is leaving through an open wall.
@@ -117,6 +125,10 @@ public final class PearlControl {
 
 	public static int escaping() {
 		return escaping;
+	}
+
+	public static int making() {
+		return making;
 	}
 
 	// each selector pulses its own relay column (~40 ticks), which flips that axis's wall
@@ -185,8 +197,10 @@ public final class PearlControl {
 			countedPearl = e.getId();
 			int[] c = stackedByLabel();
 			double[] land = landingFor(p, c);
-			int ticks = IN_CANNON_TICKS + (int) Math.ceil(land[2]);
-			Eta.startTicks(p, ticks, IN_CANNON_TICKS, level.getGameTime());
+			Eta.startTicks(p, etaTicks(land[2], land[3]), IN_CANNON_TICKS, level.getGameTime());
+			thrownFor = p;
+			thrownFlight = land[2];
+			thrownJumps = land[3];
 			launchCheckAt = level.getGameTime() + IN_CANNON_TICKS + 60;
 			chargesAtThrow = stored;
 			p.fired = true;
@@ -199,11 +213,41 @@ public final class PearlControl {
 	public static boolean startCountdown(Pairing p, long gameTime) {
 		if (p != pairing || !known()) return false;
 		double[] land = landingFor(p, stackedByLabel());
-		Eta.startTicks(p, IN_CANNON_TICKS + (int) Math.ceil(land[2]), IN_CANNON_TICKS, gameTime);
+		Eta.startTicks(p, etaTicks(land[2], land[3]), IN_CANNON_TICKS, gameTime);
+		thrownFor = null;
 		p.fired = true;
 		p.loaded = false;
 		Store.save();
 		return true;
+	}
+
+	// from passing the powder snow to landing: the flight, plus the waits for chunks the server has to load on the way
+	public static int etaTicks(double flightTicks, double farJumps) {
+		return IN_CANNON_TICKS + (int) Math.ceil(flightTicks + chunkWait() * farJumps);
+	}
+
+	public static double chunkWait() {
+		Double w = Store.data().chunkWait.get(chunkWaitKey());
+		if (w != null) return w;
+		Minecraft mc = Minecraft.getInstance();
+		return mc.level != null && Pairing.NETHER.equals(FireControl.dimensionId(mc.level)) ? DEFAULT_NETHER_CHUNK_WAIT : DEFAULT_CHUNK_WAIT;
+	}
+
+	// per server and dimension: new Nether terrain is much slower to make than flat land
+	private static String chunkWaitKey() {
+		Minecraft mc = Minecraft.getInstance();
+		return Store.worldKey() + " " + (mc.level == null ? "" : FireControl.dimensionId(mc.level));
+	}
+
+	// learns how long this server takes per chunk from what the flight really took
+	static void landed(Pairing p, long gameTime) {
+		int took = (int) (gameTime - p.etaStart);
+		if (p == thrownFor && thrownJumps >= 10 && took > IN_CANNON_TICKS + thrownFlight * 0.8) {
+			double seen = Math.min(MAX_CHUNK_WAIT, Math.max(0, (took - IN_CANNON_TICKS - thrownFlight) / thrownJumps));
+			Store.data().chunkWait.put(chunkWaitKey(), 0.3 * chunkWait() + 0.7 * seen);
+		}
+		thrownFor = null;
+		Eta.landed(p, gameTime);
 	}
 
 	// The lift sometimes drops the pearl. If all the charges are still there well after it
@@ -227,8 +271,7 @@ public final class PearlControl {
 		PearlLayout l = p.pearl;
 		int[] world = new int[4];
 		for (Axis label : Axis.values()) world[l.worldFor(label).ordinal()] += byLabel[label.ordinal()];
-		int landY = p.netherConversion() || !p.hasTarget ? p.originY - 1 : p.targetY - 1;
-		return PearlCalculator.landing(p.originX, p.originY, p.originZ, landY, world[Axis.NORTH.ordinal()], world[Axis.EAST.ordinal()],
+		return PearlCalculator.landing(p.originX, p.originY, p.originZ, p.pearlLandY(), world[Axis.NORTH.ordinal()], world[Axis.EAST.ordinal()],
 				world[Axis.SOUTH.ordinal()], world[Axis.WEST.ordinal()]);
 	}
 

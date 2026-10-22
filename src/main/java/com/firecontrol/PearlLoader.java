@@ -40,8 +40,9 @@ import net.minecraft.world.phys.shapes.VoxelShape;
 public final class PearlLoader {
 	private static final int CLICKS_PER_TICK = 2;
 	private static final int OPEN_TIMEOUT = 40;
-	private static final int STUCK_TICKS = 60;
+	private static final int STUCK_TICKS = 100;
 	private static final int STALL_TICKS = 20 * 60;
+	private static final int BATCH_DONE_TICKS = 20 * 15;
 	private static final int SETTLE_TIMEOUT = 20 * 60;
 	private static final int MAX_TOP_UPS = 2;
 
@@ -73,16 +74,26 @@ public final class PearlLoader {
 	private static final Deque<Click> clicks = new ArrayDeque<>();
 	private static final List<Integer> carried = new ArrayList<>();
 	private static int carriedCount, inputBefore;
-	private static int stackedBefore, made, settled, lastProgressTick;
+	private static int stackedBefore, made, settled;
+	private static long lastProgressAt, escapingSince = -1;
+	private static final int ESCAPE_TICKS = 40;
+	// container clicks: ticks since the last one, and tries
+	private static int answerTicks, retries;
+	private static final int MAX_RETRIES = 3, OPEN_ATTEMPTS = 5, MAX_PRESSES = 4;
 	private static String title = "", step = "";
-	private static int expectedTicks;
-	// wall clock, so the bar moves smoothly through lag
-	private static long startMillis;
+	private static int expectedTicks, plannedSplits;
+	// in game ticks, since the cannon runs on server time. A pause holds it, except while the cannon carries on by itself.
+	private static long startTick, heldTicks, heldSince = -1, lastTick;
+	// server ticks per real second, measured, so the time left is in real seconds on a lagging server
+	private static double tps = 20;
+	private static long tpsMillis = -1, tpsTick;
+	// game time the cannon was last seen doing something. Chunks the server doesn't tick still show, but go quiet.
+	private static long activeAt;
+	private static final int QUIET_TICKS = 300;
 	private static final int PRESS_TICKS = 45, BATCH_TICKS = 25;
 	private static final int BATCH_FIXED_TICKS = (int) PearlCalculator.loadTicks(1) - 9;
 
-	private static boolean paused;
-	private static long pausedAt;
+	private static boolean paused, batchRetried;
 	private static int ownBefore;
 	private static boolean took;
 	// counted on resume, not at the pause: items dropped off the cursor only show up after a server sync
@@ -99,6 +110,11 @@ public final class PearlLoader {
 
 	public static boolean paused() {
 		return paused && FireControl.active() == pairing && sameShot(pairing.solvePearl(), solution);
+	}
+
+	// paused, but the cannon is still busy with its own part, so the clock runs
+	public static boolean carriesOn() {
+		return paused() && heldSince < 0;
 	}
 
 	public static String phase() {
@@ -124,8 +140,43 @@ public final class PearlLoader {
 	// clock based, eases toward full if the cannon takes longer
 	public static double progress() {
 		if (!running && !paused) return -1;
-		double x = ((paused ? pausedAt : net.minecraft.util.Util.getMillis()) - startMillis) / (50.0 * Math.max(1, expectedTicks));
+		double partial = heldSince < 0 ? Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false) : 0;
+		double x = (elapsedTicks() + partial) / Math.max(1, expectedTicks);
 		return x < 0.85 ? x : 0.85 + 0.15 * (1 - Math.exp(-(x - 0.85) / 0.15));
+	}
+
+	// the server's time packets can set the client's game time back a little
+	private static long gameTime() {
+		ClientLevel level = Minecraft.getInstance().level;
+		if (level != null) lastTick = Math.max(lastTick, level.getGameTime());
+		return lastTick;
+	}
+
+	private static long elapsedTicks() {
+		return (heldSince >= 0 ? heldSince : gameTime()) - startTick - heldTicks;
+	}
+
+	private static void hold(boolean on) {
+		long now = gameTime();
+		if (on && heldSince < 0) {
+			heldSince = now;
+		} else if (!on && heldSince >= 0) {
+			heldTicks += now - heldSince;
+			heldSince = -1;
+		}
+	}
+
+	private static void measureTps(ClientLevel level) {
+		long millis = net.minecraft.util.Util.getMillis();
+		if (tpsMillis < 0 || millis - tpsMillis > 10_000) {
+			tpsMillis = millis;
+			tpsTick = level.getGameTime();
+		} else if (millis - tpsMillis >= 2000) {
+			double seen = (level.getGameTime() - tpsTick) * 1000.0 / (millis - tpsMillis);
+			tps = Mth.clamp(0.5 * tps + 0.5 * seen, 1, 20);
+			tpsMillis = millis;
+			tpsTick = level.getGameTime();
+		}
 	}
 
 	private static void say(String t, String s) {
@@ -142,10 +193,10 @@ public final class PearlLoader {
 		return job.count + " · " + timeLeft();
 	}
 
-	private static String timeLeft() {
-		int left = expectedTicks - (int) ((net.minecraft.util.Util.getMillis() - startMillis) / 50);
+	public static String timeLeft() {
+		long left = expectedTicks - elapsedTicks();
 		if (left <= 0) return "almost done";
-		int sec = (left + 19) / 20;
+		int sec = (int) Math.ceil(left / tps);
 		return sec / 60 + ":" + String.format("%02d", sec % 60) + " left";
 	}
 
@@ -200,6 +251,8 @@ public final class PearlLoader {
 			Msg.info(String.format("A pearl thrown now lands near %.0f %.0f. Charges can't be taken out, so fire them before loading a new target.", land[0], land[1]));
 			return;
 		}
+		// picked, so it stays the active preset while you step away
+		if (!p.name.equals(Store.data().selected.get(Store.worldKey()))) Actions.select(p);
 		pairing = p;
 		solution = s;
 		jobs.clear();
@@ -225,10 +278,20 @@ public final class PearlLoader {
 			previous = j.label;
 		}
 		for (Axis a : Axis.values()) if (PearlControl.lit(a) && a != jobs.peekFirst().label) presses++;
-		expectedTicks = totalTicks + presses * PRESS_TICKS + jobs.size() * BATCH_TICKS;
-		timeout = totalTicks * 2 + 20 * 120;
+		// an axis goes in batches when the INPUT or your free slots can't hold it all; plan those now so the time doesn't jump
+		int free = 0;
+		for (int i = 0; i < 36; i++) if (player.getInventory().getItem(i).isEmpty()) free++;
+		int perBatch = Math.max(1, Math.min(free, l.inputSlots()) * 64);
+		plannedSplits = 0;
+		for (Job j : jobs) plannedSplits += (j.count - 1) / perBatch;
+		expectedTicks = totalTicks + presses * PRESS_TICKS + jobs.size() * BATCH_TICKS + plannedSplits * (BATCH_FIXED_TICKS + BATCH_TICKS);
+		timeout = totalTicks * 3 + 20 * 300;
 		ticks = 0;
-		startMillis = net.minecraft.util.Util.getMillis();
+		lastTick = mc.level.getGameTime();
+		startTick = lastTick;
+		heldTicks = 0;
+		heldSince = -1;
+		batchRetried = false;
 		pressedAxis = null;
 		waitingWall = null;
 		closedAt = -100;
@@ -267,7 +330,7 @@ public final class PearlLoader {
 		Minecraft mc = Minecraft.getInstance();
 		running = false;
 		paused = true;
-		pausedAt = net.minecraft.util.Util.getMillis();
+		hold(!cannonBusy(mc));
 		releaseKeys();
 		if (mc.player != null && clickedContainer) {
 			putBackCursor(mc);
@@ -283,8 +346,10 @@ public final class PearlLoader {
 
 	private static void resume(Minecraft mc) {
 		paused = false;
-		startMillis += net.minecraft.util.Util.getMillis() - pausedAt;
-		lastProgressTick = ticks;
+		hold(false);
+		lastProgressAt = mc.level == null ? 0 : mc.level.getGameTime();
+		attempts = 0;
+		pressedAxis = null;
 		opener = Compat.screen(mc);
 		switch (phase) {
 			case OPEN_COUNTER, TAKE -> setPhase(Phase.OPEN_COUNTER);
@@ -305,8 +370,16 @@ public final class PearlLoader {
 		if (mid && left > 0) Msg.info("You still have " + left + " " + itemName() + " from the COUNTER ITEMS barrel in your inventory.");
 	}
 
+	// what an axis still needs. The cannon doesn't always make exactly one charge per item, so this goes by its stack.
+	private static int missing(Axis label) {
+		return solution.charges(pairing.pearl.worldFor(label)) - PearlControl.stacked(label);
+	}
+
 	private static void nextJob() {
-		job = jobs.pollFirst();
+		PearlControl.readNow(Minecraft.getInstance().level);
+		do {
+			job = jobs.pollFirst();
+		} while (job != null && missing(job.label) <= 0);
 		if (job == null) {
 			setPhase(Phase.SETTLE);
 			return;
@@ -319,12 +392,41 @@ public final class PearlLoader {
 		phase = p;
 		phaseTicks = 0;
 		stuck = 0;
+		answerTicks = 0;
+		retries = 0;
+		escapingSince = -1;
 		attempts = p == Phase.SELECT ? attempts : 0;
 		putPlanned = false;
 		if (p == Phase.TAKE) took = false;
+		active(Minecraft.getInstance().level);
+	}
+
+	private static void active(ClientLevel level) {
+		if (level != null) activeAt = level.getGameTime();
+	}
+
+	// what the cannon does by itself (charges, a wall flipping, settling) goes on during a pause,
+	// as long as it's loaded here and seen moving
+	private static boolean cannonBusy(Minecraft mc) {
+		ClientLevel level = mc.level;
+		// a batch shows nothing while the cannon runs its items through
+		long quiet = phase == Phase.WAIT && made == 0 ? firstChargeTicks(job.count) : QUIET_TICKS;
+		if (level == null || mc.isPaused() || FireControl.active() != pairing || !PearlControl.known()
+				|| level.getGameTime() - activeAt > quiet) return false;
+		return switch (phase) {
+			case WAIT -> PearlControl.stacked(job.label) - stackedBefore < job.count;
+			case SETTLE -> !PearlControl.holeOpen();
+			case SELECT, CLEAR -> waitingWall != null && PearlControl.wallOpen(waitingWall) != PearlControl.lit(waitingWall);
+			default -> false;
+		};
 	}
 
 	public static void tick(Minecraft mc) {
+		if (mc.level != null && (running || paused)) measureTps(mc.level);
+		if (paused) {
+			if (phase == Phase.WAIT && mc.level != null && FireControl.active() == pairing && mc.level.getGameTime() % 5 == 0) countCharges(mc.level);
+			hold(!cannonBusy(mc));
+		}
 		if (!running) return;
 		LocalPlayer player = mc.player;
 		ClientLevel level = mc.level;
@@ -339,12 +441,15 @@ public final class PearlLoader {
 			return;
 		}
 		opener = null;
-		// the closed screen can still be up for a tick on some versions
-		if (!clickedContainer && screen instanceof AbstractContainerScreen && ticks - closedAt >= 0 && ticks - closedAt <= 5) {
-			Compat.setScreen(mc, null);
+		// a container we clicked can show up late on a slow server
+		boolean opening = clickedContainer || (phase == Phase.OPEN_COUNTER || phase == Phase.OPEN_INPUT) && attempts > 0;
+		// the closed screen can still be up for a tick on some versions, or come back late after a second click
+		if (!opening && screen instanceof AbstractContainerScreen<?> s && s.getMenu() != player.inventoryMenu
+				&& ticks - closedAt >= 0 && ticks - closedAt <= 5 + openTimeout(mc)) {
+			player.closeContainer();
 			return;
 		}
-		boolean ownScreen = clickedContainer && screen instanceof AbstractContainerScreen;
+		boolean ownScreen = opening && screen instanceof AbstractContainerScreen;
 		if (FireControl.active() != pairing || pairing.solvePearl() == null) {
 			stop("the target or preset changed");
 			return;
@@ -389,10 +494,11 @@ public final class PearlLoader {
 		PearlControl.readNow(level);
 		// One selector at a time. Two pulses in neighbouring columns can jam one of them,
 		// and then its wall stays open.
+		int wallTicks = WALL_TICKS + 2 * lagTicks(mc);
 		if (waitingWall != null) {
 			if (PearlControl.wallOpen(waitingWall) == Blocks2.isLit(level.getBlockState(l.bulb(waitingWall)))) {
 				waitingWall = null;
-			} else if (level.getGameTime() - pressedAt > WALL_TICKS) {
+			} else if (level.getGameTime() - pressedAt > wallTicks) {
 				stop(wallProblem(level, waitingWall));
 				return;
 			} else {
@@ -402,7 +508,7 @@ public final class PearlLoader {
 		// give a pulse that is already on its way time to arrive
 		for (Axis a : Axis.values()) {
 			if (PearlControl.wallOpen(a) != Blocks2.isLit(level.getBlockState(l.bulb(a)))) {
-				if (phaseTicks > WALL_TICKS) stop(wallProblem(level, a));
+				if (phaseTicks > wallTicks) stop(wallProblem(level, a));
 				return;
 			}
 		}
@@ -424,10 +530,11 @@ public final class PearlLoader {
 			stop("the " + press.label + " button is missing");
 			return;
 		}
-		if (press == pressedAxis && level.getGameTime() - pressedAt < 30) return;
+		// a press counts once the server has let the button go again, so a slow one isn't pressed twice
+		if (press == pressedAxis && level.getGameTime() - pressedAt < 30 + 2 * lagTicks(mc)) return;
 		if (Blocks2.isPressed(button)) return;
-		if (press == pressedAxis && ++attempts > 3) {
-			stop("the " + press.label + " selector bulb didn't switch");
+		if (press == pressedAxis && ++attempts > MAX_PRESSES) {
+			pause("the " + press.label + " selector bulb didn't switch after " + MAX_PRESSES + " presses");
 			return;
 		}
 		if (!reach(mc, player, buttonPos)) return;
@@ -438,6 +545,7 @@ public final class PearlLoader {
 		if (press != pressedAxis) attempts = 0;
 		pressedAxis = press;
 		pressedAt = level.getGameTime();
+		active(level);
 		waitingWall = press;
 		cooldown = Math.max(1, Store.data().pressInterval);
 	}
@@ -463,19 +571,26 @@ public final class PearlLoader {
 	private static void open(Minecraft mc, LocalPlayer player, ClientLevel level, BlockPos pos, int slots, Phase next, String what) {
 		say("Loading " + job.label.label, next == Phase.TAKE ? "taking " + job.count + " counter items" : "filling the INPUT");
 		AbstractContainerMenu menu = player.containerMenu;
-		if (clickedContainer && menu != player.inventoryMenu && menu.slots.size() == slots + 36) {
-			// let the contents packet arrive
-			if (++stuck >= 2) {
-				stuck = 0;
-				setPhase(next);
+		// also when a slow server opens it only after a second click. The contents come after the screen,
+		// with a state id; clicking before that would go by an empty container.
+		if ((clickedContainer || attempts > 0) && menu != player.inventoryMenu && menu.slots.size() == slots + 36) {
+			clickedContainer = true;
+			if (menu.getStateId() != 0) {
+				if (++stuck >= 2) {
+					stuck = 0;
+					setPhase(next);
+				}
+			} else if (phaseTicks > openTimeout(mc)) {
+				player.closeContainer();
+				clickedContainer = false;
+				retryOpen(what);
 			}
 			return;
 		}
 		if (clickedContainer) {
-			if (phaseTicks > OPEN_TIMEOUT) {
+			if (phaseTicks > openTimeout(mc)) {
 				clickedContainer = false;
-				if (++attempts > 1) stop("couldn't open " + what + " (is it blocked or protected?)");
-				else phaseTicks = 0;
+				retryOpen(what);
 			}
 			return;
 		}
@@ -496,6 +611,19 @@ public final class PearlLoader {
 		phaseTicks = 0;
 	}
 
+	private static int openTimeout(Minecraft mc) {
+		return OPEN_TIMEOUT + 3 * lagTicks(mc);
+	}
+
+	private static void retryOpen(String what) {
+		if (++attempts >= OPEN_ATTEMPTS) pause("couldn't open " + what + " (something in the way, or the server is lagging)");
+		else phaseTicks = 0;
+	}
+
+	private static int lagTicks(Minecraft mc) {
+		return FireControl.lagTicks(mc);
+	}
+
 	private static void take(Minecraft mc, LocalPlayer player) {
 		AbstractContainerMenu menu = player.containerMenu;
 		if (menu == player.inventoryMenu) {
@@ -508,13 +636,26 @@ public final class PearlLoader {
 		}
 		if (phaseTicks == 1 && !planTake(menu, player)) return;
 		if (!clickSome(mc, menu)) return;
+		// a click the server refused comes back as a resync, so check once it had time to answer
+		if (++answerTicks <= 2 + lagTicks(mc)) return;
+		if (!menu.getCarried().isEmpty()) {
+			putBackCursor(mc);
+			answerTicks = 0;
+			return;
+		}
 		int got = 0;
 		for (int index : carried) {
 			ItemStack st = player.getInventory().getItem(index);
 			if (st.is(counterItem)) got += st.getCount();
 		}
-		if (got != carriedCount || !menu.getCarried().isEmpty()) {
-			stop("the items didn't move as planned (" + got + " of " + carriedCount + "); check your inventory");
+		if (got != carriedCount) {
+			// put back whatever did move and plan again
+			if (++retries <= MAX_RETRIES) {
+				giveBack = true;
+				phaseTicks = 0;
+				return;
+			}
+			pause("the counter items didn't come out of the barrel as planned (" + got + " of " + carriedCount + ")");
 			return;
 		}
 		player.closeContainer();
@@ -524,6 +665,17 @@ public final class PearlLoader {
 	}
 
 	private static boolean planTake(AbstractContainerMenu menu, LocalPlayer player) {
+		answerTicks = 0;
+		PearlControl.readNow(Minecraft.getInstance().level);
+		int want = missing(job.label);
+		if (want <= 0) {
+			// the batch before made enough
+			player.closeContainer();
+			clickedContainer = false;
+			closedAt = ticks;
+			nextJob();
+			return false;
+		}
 		Inventory inv = player.getInventory();
 		List<Slot> barrel = new ArrayList<>(), empty = new ArrayList<>();
 		for (Slot s : menu.slots) {
@@ -546,8 +698,8 @@ public final class PearlLoader {
 		int stackSize = new ItemStack(counterItem).getMaxStackSize();
 		int[] counts = new int[barrel.size()];
 		for (int i = 0; i < counts.length; i++) counts[i] = barrel.get(i).getItem().is(counterItem) ? barrel.get(i).getItem().getCount() : 0;
-		// one batch = what fits in the INPUT and the free slots
-		int batch = Math.min(job.count, pairing.pearl.inputSlots() * stackSize);
+		// one batch = what the axis still needs, as far as the INPUT and the free slots go
+		int batch = Math.min(want, pairing.pearl.inputSlots() * stackSize);
 		clicks.clear();
 		carried.clear();
 		carriedCount = 0;
@@ -578,11 +730,12 @@ public final class PearlLoader {
 					: "the COUNTER ITEMS barrel has no " + itemName() + " left");
 			return false;
 		}
-		if (carriedCount < job.count) {
-			jobs.addFirst(new Job(job.label, job.count - carriedCount));
-			job = new Job(job.label, carriedCount);
-			expectedTicks += BATCH_FIXED_TICKS + BATCH_TICKS;
+		if (carriedCount < want) {
+			jobs.addFirst(new Job(job.label, want - carriedCount));
+			if (plannedSplits > 0) plannedSplits--;
+			else expectedTicks += BATCH_FIXED_TICKS + BATCH_TICKS;
 		}
+		job = new Job(job.label, carriedCount);
 		return true;
 	}
 
@@ -601,14 +754,21 @@ public final class PearlLoader {
 				else if (s.getContainerSlot() < 36 && s.getItem().is(counterItem)) mine.add(s);
 			}
 			clicks.clear();
+			answerTicks = 0;
 			if (planMove(mine, barrel, giveBackCount) < giveBackCount) {
 				stop("couldn't put " + giveBackCount + " " + itemName() + " back in the COUNTER ITEMS barrel (is it full?)");
 				return;
 			}
 		}
 		if (!clickSome(mc, menu)) return;
+		if (++answerTicks <= 2 + lagTicks(mc)) return;
 		if (counterItems(player) != ownBefore || !menu.getCarried().isEmpty()) {
-			stop("the items didn't go back as planned; check your inventory and the COUNTER ITEMS barrel");
+			if (++retries <= MAX_RETRIES) {
+				putBackCursor(mc);
+				phaseTicks = 0;
+				return;
+			}
+			pause("the counter items didn't go back into the barrel as planned");
 			return;
 		}
 		giveBack = false;
@@ -665,29 +825,38 @@ public final class PearlLoader {
 		if (phaseTicks == 1) {
 			if (!putAgain) {
 				inputBefore = 0;
-				for (Slot s : menu.slots) if (s.container != inv) inputBefore += s.getItem().getCount();
-				if (inputBefore > 0) {
-					stop("the INPUT already has " + inputBefore + " items in it. Wait until the cannon has used them, then try again");
+				int other = 0;
+				for (Slot s : menu.slots) {
+					if (s.container == inv || !s.hasItem()) continue;
+					if (s.getItem().is(counterItem)) inputBefore += s.getItem().getCount();
+					else other += s.getItem().getCount();
+				}
+				if (other > 0) {
+					stop("the INPUT has " + other + " other items in it. Take them out, then try again");
 					return;
 				}
 				PearlControl.readNow(Minecraft.getInstance().level);
 				stackedBefore = PearlControl.stacked(job.label);
 			}
-			clicks.clear();
-			for (Slot s : menu.slots) {
-				if (s.container == inv && carried.contains(s.getContainerSlot()) && s.getItem().is(counterItem)) clicks.add(new Click(s.index, 0, true));
-			}
-			putPlanned = true;
+			planPut(menu, inv);
 		}
 		if (!clickSome(mc, menu)) return;
-		int in = 0, left = 0;
-		for (Slot s : menu.slots) if (s.container != inv) in += s.getItem().getCount();
+		if (++answerTicks <= 2 + lagTicks(mc)) return;
+		int left = 0;
 		for (int index : carried) if (inv.getItem(index).is(counterItem)) left += inv.getItem(index).getCount();
-		// after a pause some may already be used, so only check nothing is left over
-		if (putAgain ? left > 0 : in != carriedCount) {
-			stop("the INPUT took " + (putAgain ? carriedCount - left : in) + " of " + carriedCount + " items");
+		if (left > 0 && ++retries <= MAX_RETRIES) {
+			planPut(menu, inv);
 			return;
 		}
+		// counted by what left your inventory: the cannon starts using the INPUT straight away. Counter items
+		// still in the INPUT from before become charges for this axis too.
+		int batch = inputBefore + carriedCount - left;
+		if (batch <= 0) {
+			pause("the INPUT didn't take the counter items");
+			return;
+		}
+		if (left > 0) Msg.info(left + " " + itemName() + " didn't fit in the INPUT; they're still in your inventory.");
+		job = new Job(job.label, batch);
 		putAgain = false;
 		carriedCount = 0;
 		player.closeContainer();
@@ -695,8 +864,17 @@ public final class PearlLoader {
 		closedAt = ticks;
 		made = 0;
 		settled = 0;
-		lastProgressTick = ticks;
 		setPhase(Phase.WAIT);
+		lastProgressAt = mc.level.getGameTime();
+	}
+
+	private static void planPut(AbstractContainerMenu menu, Inventory inv) {
+		clicks.clear();
+		answerTicks = 0;
+		for (Slot s : menu.slots) {
+			if (s.container == inv && carried.contains(s.getContainerSlot()) && s.getItem().is(counterItem)) clicks.add(new Click(s.index, 0, true));
+		}
+		putPlanned = true;
 	}
 
 	private static boolean clickSome(Minecraft mc, AbstractContainerMenu menu) {
@@ -718,30 +896,72 @@ public final class PearlLoader {
 		}
 	}
 
-	// any charge below the breeze chambers that isn't in a stack belongs to this batch
-	private static void waitForCharges(ClientLevel level) {
-		if (phaseTicks % 5 != 0) return;
+	// any charge below the breeze chambers that isn't in a stack belongs to this batch. Returns how many are in its stack.
+	private static int countCharges(ClientLevel level) {
 		PearlControl.readNow(level);
 		int inStack = PearlControl.stacked(job.label) - stackedBefore;
 		int elsewhere = 0;
 		for (Axis a : Axis.values()) if (a != job.label) elsewhere += PearlControl.stacked(a);
-		int mine = Math.max(inStack, PearlControl.stored() - elsewhere - stackedBefore);
+		int mine = Math.max(inStack, PearlControl.stored() + PearlControl.making() - elsewhere - stackedBefore);
 		if (mine > made || inStack > settled) {
 			made = Math.max(made, mine);
 			settled = Math.max(settled, inStack);
-			lastProgressTick = ticks;
+			lastProgressAt = level.getGameTime();
+			active(level);
 		}
+		return inStack;
+	}
+
+	// The cannon runs the items through before the first charge shows, about 8.5 ticks each:
+	// over a minute for a big batch.
+	private static long firstChargeTicks(int count) {
+		return (long) PearlCalculator.loadTicks(count);
+	}
+
+	// in the cannon but in no stack: still up top, on their way, or stuck
+	private static int loose() {
+		int n = PearlControl.stored() + PearlControl.making();
+		for (Axis a : Axis.values()) n -= PearlControl.stacked(a);
+		return n;
+	}
+
+	private static void waitForCharges(ClientLevel level) {
+		if (phaseTicks % 5 != 0) return;
+		int inStack = countCharges(level);
 		// charges arrive in bursts, so the HUD uses the time based bar instead of a count
 		say("Loading " + job.label.label, job.count + " charge" + (job.count == 1 ? "" : "s"));
-		if (inStack >= job.count) {
+		// in game time, so a lagging server gets the same time
+		long quiet = level.getGameTime() - lastProgressAt;
+		// the cannon doesn't always make one charge per item, so let any still on their way arrive before switching
+		if (inStack >= job.count && (loose() == 0 || quiet > BATCH_DONE_TICKS)) {
+			batchRetried = false;
 			nextJob();
 			return;
 		}
-		if (PearlControl.escaping() > 0) {
+		// a charge dropping from the breezes can pass the wall corners on its way in; one flying out stays outside
+		if (PearlControl.escaping() == 0) escapingSince = -1;
+		else if (escapingSince < 0) escapingSince = level.getGameTime();
+		else if (level.getGameTime() - escapingSince >= ESCAPE_TICKS) {
 			stop(escaped(level));
 			return;
 		}
-		if (ticks - lastProgressTick > STALL_TICKS) {
+		// a batch that went quiet a little short, or that filled its axis anyway, carries on; short axes are topped up at the end
+		boolean inPlace = made > 0 && made - inStack <= Math.max(1, made / 20);
+		if (quiet > BATCH_DONE_TICKS && inPlace && (job.count - inStack <= Math.max(2, job.count / 10) || missing(job.label) <= 0)) {
+			batchRetried = false;
+			nextJob();
+			return;
+		}
+		long stall = made == 0 ? firstChargeTicks(job.count) + STALL_TICKS : STALL_TICKS;
+		// nothing at all, e.g. the items were used up while you were away: load the batch again, once
+		if (quiet > stall && made == 0 && !batchRetried) {
+			batchRetried = true;
+			jobs.addFirst(new Job(job.label, job.count));
+			expectedTicks += (int) PearlCalculator.loadTicks(job.count) + BATCH_TICKS;
+			nextJob();
+			return;
+		}
+		if (quiet > stall) {
 			stop(made >= job.count ? "the " + job.label.label + " charges didn't reach their stack (" + inStack + "/" + job.count + ")"
 					: "the cannon stopped making charges at " + made + "/" + job.count + ". Check its breezes and the INPUT");
 		}
@@ -802,8 +1022,8 @@ public final class PearlLoader {
 			stuck = 0;
 			return true;
 		}
-		if (++stuck > STUCK_TICKS) {
-			stop("couldn't reach " + pos.toShortString());
+		if (++stuck > STUCK_TICKS + 2 * lagTicks(mc)) {
+			pause("couldn't get close enough to " + pos.toShortString());
 			return false;
 		}
 		Vec3 target = pairing.pearl.standSpot();

@@ -55,12 +55,15 @@ loom {
 			programArgs "--username", "FCTester"
 		}
 		// gradlew runPearlE2e -Ppearlschem=<360_PearlCannon-Overworld.litematic>
+		// or -Ppearlschem=<360_PearlCannon-Nether.litematic> -Ppearldim=nether
 		pearlE2e {
 			client()
 			name = "FireControl Pearl E2E"
 			source sourceSets.e2e
 			runDir = obfuscated ? "run-pearl-${project.minecraft_version}" : "run-pearl"
 			vmArg "-Dfirecontrol.pearl=${project.findProperty('pearlschem') ?: 'missing'}"
+			vmArg "-Dfirecontrol.pearldim=${project.findProperty('pearldim') ?: 'overworld'}"
+			vmArg "-Dfirecontrol.away=${project.findProperty('away') ?: '10'}"
 			programArgs "--username", "FCTester"
 		}
 		// gradlew runGroundE2e

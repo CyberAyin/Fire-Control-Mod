@@ -236,7 +236,7 @@ public final class FireControlScreen extends Screen {
 			inputError = "Type a magazine slot from 0.";
 		} else {
 			if (autoY) {
-				GroundHeight.Answer a = GroundHeight.at(pairing.dimension, x, z);
+				GroundHeight.Answer a = GroundHeight.forTarget(pairing, x, z, pairing.dimension);
 				if (a.status() == GroundHeight.Status.WORKING) waitingGround = new int[] {x, z};
 				else if (!a.ready()) inputError = "No ground height here (" + a.why() + "). Type a Y.";
 				else y = a.y();
@@ -256,13 +256,12 @@ public final class FireControlScreen extends Screen {
 		}
 		String dim = overworldCoords == null ? pairing.dimension : overworldCoords.getValue() ? "minecraft:overworld" : pairing.dimension;
 		if (autoY) {
-			String ground = pairing.groundDimension(dim);
-			GroundHeight.Answer a = ground == null || Pairing.NETHER.equals(ground) ? null : GroundHeight.at(ground, x, z);
-			if (a != null && a.status() == GroundHeight.Status.WORKING) {
+			GroundHeight.Answer a = GroundHeight.forTarget(pairing, x, z, dim);
+			if (a.status() == GroundHeight.Status.WORKING) {
 				waitingGround = new int[] {x, z};
 				return;
 			}
-			y = a != null && a.ready() ? a.y() : pairing.originY;
+			y = a.ready() ? a.y() : pairing.originY;
 		}
 		if (!pairing.hasTarget || pairing.targetX != x || pairing.targetY != y || pairing.targetZ != z || !dim.equals(pairing.targetDimension)) {
 			Actions.setPearlTarget(pairing, new BlockPos(x, y, z), dim);
@@ -387,7 +386,7 @@ public final class FireControlScreen extends Screen {
 		} else if (s.total() == 0) {
 			sol = Component.literal("That's the cannon itself.").withStyle(ChatFormatting.YELLOW);
 		} else {
-			double flight = PearlControl.IN_CANNON_TICKS + s.flightTicks;
+			double flight = PearlControl.etaTicks(s.flightTicks, s.farJumps);
 			sol = Component.literal(PearlControl.plan(pairing, s)).withStyle(ChatFormatting.WHITE)
 					.append(Component.literal(String.format(" · lands %.0f %.0f%s (±%.0f) · flight %s", s.landX, s.landZ,
 							pairing.netherConversion() ? " (nether)" : "", s.error, FireCalculator.formatTicks(flight))).withStyle(ChatFormatting.GRAY));
@@ -398,8 +397,9 @@ public final class FireControlScreen extends Screen {
 		boolean ready = FireControl.active() == pairing && PearlControl.ready();
 		long now = minecraft.level == null ? 0 : minecraft.level.getGameTime();
 		MutableComponent pl;
-		if (Eta.running(pairing, now) && Eta.remaining(pairing, now) > 0) {
-			pl = Component.literal("Pearl on its way · lands in " + FireCalculator.formatTicks(Eta.remaining(pairing, now))).withStyle(ChatFormatting.AQUA);
+		if (Eta.running(pairing, now) && (Eta.remaining(pairing, now) > 0 || Eta.waitsForLanding(pairing))) {
+			long left = Eta.remaining(pairing, now);
+			pl = Component.literal("Pearl on its way · " + (left > 0 ? "lands in " + FireCalculator.formatTicks(left) : "landing any moment")).withStyle(ChatFormatting.AQUA);
 		} else if (pairing.fired) {
 			pl = Component.literal("✔ Pearl sent. Change the target for the next one.").withStyle(ChatFormatting.GREEN);
 		} else if (!valid) {
@@ -407,7 +407,7 @@ public final class FireControlScreen extends Screen {
 		} else if (PearlLoader.running()) {
 			pl = Component.literal(PearlLoader.status()).withStyle(ChatFormatting.YELLOW);
 		} else if (PearlLoader.paused()) {
-			pl = Component.literal("Loading paused").withStyle(ChatFormatting.YELLOW);
+			pl = Component.literal(PearlLoader.carriesOn() ? "Loading paused · cannon still working · " + PearlLoader.timeLeft() : "Loading paused").withStyle(ChatFormatting.YELLOW);
 		} else if (ready) {
 			pl = Component.literal("✔ Ready: step into the hole and throw your pearl straight up").withStyle(ChatFormatting.AQUA);
 		} else if (!atCannon) {
@@ -439,24 +439,22 @@ public final class FireControlScreen extends Screen {
 		String hint = !empty ? "" : waitingGround != null ? "auto …" : pairing.hasTarget && pairing.autoY ? "auto " + pairing.targetY : "auto";
 		yBox.setHint(Component.literal(hint).withStyle(ChatFormatting.DARK_GRAY));
 
-		String dim = pairing.isPearl() ? pairing.groundDimension(pairing.hasTarget ? pairing.targetDimension : pairing.dimension) : pairing.dimension;
-		boolean floorOnly = pairing.isPearl() && (dim == null || Pairing.NETHER.equals(dim));
-		String tip;
-		if (floorOnly) {
-			tip = "Leave Y empty to land at the cannon's floor height.";
-		} else {
-			tip = "Leave Y empty for the ground there: the top block if that spot is loaded, otherwise worked out from the world's terrain"
-					+ " (on a server, from the seed set in More…). A worked-out height is the bare ground, without trees or builds."
-					+ (pairing.isPearl() ? " If there's none, the pearl lands at the cannon's floor height." : "");
-			if (empty && pairing.hasTarget && pairing.autoY && waitingGround == null) {
-				GroundHeight.Answer a = GroundHeight.at(dim, pairing.targetX, pairing.targetZ);
-				if (a.ready() && a.y() == pairing.targetY) tip += "\n\nNow: Y " + a.y() + ", " + a.source().label + ".";
-				else if (a.status() == GroundHeight.Status.NONE && pairing.isPearl()) tip += "\n\nNow: the cannon's floor height (" + a.why() + ").";
-			}
-			Store.Seed seed = Store.seed();
-			if (seed != null && Boolean.FALSE.equals(seed.matched) && Minecraft.getInstance().getSingleplayerServer() == null) {
-				tip += "\n\n⚠ The seed in More… didn't fit the ground when it was checked.";
-			}
+		boolean nether = Pairing.NETHER.equals(pairing.dimension);
+		String where = !nether ? "the ground there: the top block" : pairing.isPearl()
+				? "the Nether floor there nearest the cannon's height (the roof for a cannon on top of it): from the blocks"
+				: "the top of the Nether there (the roof): from the blocks";
+		String tip = "Leave Y empty for " + where + " if that spot is loaded, otherwise worked out from the world's terrain"
+				+ " (on a server, from the seed set in More…). A worked-out height is the bare terrain, without trees or builds."
+				+ (pairing.isPearl() ? " If there's none, the pearl lands at the cannon's floor height." : "");
+		if (empty && pairing.hasTarget && pairing.autoY && waitingGround == null) {
+			String coords = pairing.isPearl() ? pairing.targetDimension : pairing.dimension;
+			GroundHeight.Answer a = GroundHeight.forTarget(pairing, pairing.targetX, pairing.targetZ, coords);
+			if (a.ready() && a.y() == pairing.targetY) tip += "\n\nNow: Y " + a.y() + ", " + a.label() + ".";
+			else if (a.status() == GroundHeight.Status.NONE && pairing.isPearl()) tip += "\n\nNow: the cannon's floor height (" + a.why() + ").";
+		}
+		Store.Seed seed = Store.seed();
+		if (seed != null && Boolean.FALSE.equals(seed.matched) && Minecraft.getInstance().getSingleplayerServer() == null) {
+			tip += "\n\n⚠ The seed in More… didn't fit the terrain when it was checked.";
 		}
 		if (!tip.equals(yTip)) {
 			yTip = tip;

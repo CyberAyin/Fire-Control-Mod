@@ -450,10 +450,7 @@ public final class FireControlCommands {
 		LocalPlayer pl = ctx.getSource().getPlayer();
 		int x = CoordArgument.resolve(CoordArgument.get(ctx, "x"), pl.getX());
 		int z = CoordArgument.resolve(CoordArgument.get(ctx, "y"), pl.getZ());
-		String dim = p.groundDimension(FireControl.dimensionId(Minecraft.getInstance().level));
-		// the Nether has several floors, so use the cannon floor
-		if (p.isPearl() && (dim == null || Pairing.NETHER.equals(dim))) return target(new BlockPos(x, p.originY, z), mode, size, slot, false, null);
-		GroundHeight.whenReady(dim, x, z, a -> {
+		GroundHeight.whenReady(p, x, z, FireControl.dimensionId(Minecraft.getInstance().level), a -> {
 			if (a.ready() || p.isPearl()) {
 				target(new BlockPos(x, a.ready() ? a.y() : p.originY, z), mode, size, slot, false, a);
 			} else {
@@ -506,7 +503,7 @@ public final class FireControlCommands {
 	}
 
 	private static MutableComponent groundPart(GroundHeight.Answer ground) {
-		String text = ground == null ? "" : ground.ready() ? " (Y: " + ground.source().label + ")" : " (Y: cannon floor; " + ground.why() + ")";
+		String text = ground == null ? "" : ground.ready() ? " (Y: " + ground.label() + ")" : " (Y: cannon floor; " + ground.why() + ")";
 		return Msg.text(text, ChatFormatting.DARK_GRAY);
 	}
 
@@ -525,7 +522,7 @@ public final class FireControlCommands {
 			return 1;
 		}
 		head.append(Msg.text(" · " + PearlControl.plan(p, s), ChatFormatting.WHITE))
-				.append(Msg.text(String.format(" · ±%.0f blocks · flight %s ", s.error, FireCalculator.formatTicks(PearlControl.IN_CANNON_TICKS + s.flightTicks)), ChatFormatting.GRAY))
+				.append(Msg.text(String.format(" · ±%.0f blocks · flight %s ", s.error, FireCalculator.formatTicks(PearlControl.etaTicks(s.flightTicks, s.farJumps))), ChatFormatting.GRAY))
 				.append(Msg.button("Load it for me", "/firecontrol InputSettings", "Sets the axis bulbs and fills the INPUT for you (stand at the cannon)"));
 		Msg.send(head);
 		return 1;

@@ -33,12 +33,14 @@ public final class Store {
 		// ticks between presses, 1 = fastest
 		public int pressInterval = 1;
 		public Map<String, Seed> seeds = new LinkedHashMap<>();
+		// per server: game ticks a flying pearl waits for each chunk it has to load, learned from landings
+		public Map<String, Double> chunkWait = new LinkedHashMap<>();
 	}
 
 	public static final class Seed {
 		public String text;
-		// "overworld", "large_biomes" or "amplified"
-		public String terrain = "overworld";
+		// overworld terrain: "overworld", "large_biomes" or "amplified". null until checked there ("overworld" is assumed).
+		public String terrain;
 		// null = not checked yet
 		public Boolean matched;
 	}
@@ -61,6 +63,7 @@ public final class Store {
 			if (data.selected == null) data.selected = new LinkedHashMap<>();
 			if (data.pending == null) data.pending = new LinkedHashMap<>();
 			if (data.seeds == null) data.seeds = new LinkedHashMap<>();
+			if (data.chunkWait == null) data.chunkWait = new LinkedHashMap<>();
 		} catch (Exception e) {
 			LOG.error("[FireControl] Could not read {}", FILE, e);
 		}

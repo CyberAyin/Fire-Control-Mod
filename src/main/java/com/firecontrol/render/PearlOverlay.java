@@ -62,11 +62,11 @@ public final class PearlOverlay {
 
 	private static String statusLabel(Pairing p, PearlCalculator.Solution s, boolean ready) {
 		if (PearlLoader.running()) return PearlLoader.status();
-		if (PearlLoader.paused()) return "Paused · Resume in chat";
+		if (PearlLoader.paused()) return PearlLoader.carriesOn() ? "Paused · cannon still working · " + PearlLoader.timeLeft() : "Paused · Resume in chat";
 		Minecraft mc = Minecraft.getInstance();
 		if (Eta.running(p, mc.level.getGameTime())) {
 			long left = Eta.remaining(p, mc.level.getGameTime());
-			return left > 0 ? "Landing in " + FireCalculator.formatTicks(left) : "Landed";
+			return left > 0 ? "Landing in " + FireCalculator.formatTicks(left) : Eta.waitsForLanding(p) ? "Landing…" : "Landed";
 		}
 		if (s == null) return "Pearl cannon · no target";
 		if (ready) return "✔ Ready";

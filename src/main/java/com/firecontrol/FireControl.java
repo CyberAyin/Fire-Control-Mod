@@ -17,6 +17,7 @@ import java.util.Set;
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.client.multiplayer.PlayerInfo;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.core.BlockPos;
@@ -54,6 +55,12 @@ public final class FireControl {
 
 	public static String dimensionId(ClientLevel level) {
 		return level.dimension().identifier().toString();
+	}
+
+	// your ping in ticks, so waits for the server stretch with it
+	public static int lagTicks(Minecraft mc) {
+		PlayerInfo info = mc.getConnection() == null || mc.player == null ? null : mc.getConnection().getPlayerInfo(mc.player.getUUID());
+		return info == null ? 0 : Math.max(0, Math.min(100, info.getLatency() / 50));
 	}
 
 	public static List<Pairing> pairingsHere() {

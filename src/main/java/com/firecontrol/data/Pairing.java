@@ -40,6 +40,8 @@ public final class Pairing {
 	public long etaStart = -1;
 	public int etaTotalTicks;
 	public int etaPayloadTicks;
+	// pearl: you were teleported, so it really landed
+	public boolean etaLanded;
 
 	public boolean hasCannon() {
 		return cannonType != null;
@@ -90,19 +92,23 @@ public final class Pairing {
 			tx *= 8;
 			tz *= 8;
 		}
-		int landY = convert ? originY - 1 : targetY - 1;
-		return PearlCalculator.solve(originX, originY, originZ, tx, landY, tz, convert);
+		return PearlCalculator.solve(originX, originY, originZ, tx, pearlLandY(), tz, convert);
+	}
+
+	// block the pearl lands on. A Y typed with overworld coordinates says nothing about the Nether, so that uses the cannon floor.
+	public int pearlLandY() {
+		return !hasTarget || netherConversion() && !autoY ? originY - 1 : targetY - 1;
 	}
 
 	public static final String NETHER = "minecraft:the_nether";
 
 	public boolean netherConversion() {
-		return NETHER.equals(dimension) && targetDimension != null && !NETHER.equals(targetDimension);
+		return converts(targetDimension);
 	}
 
-	public String groundDimension(String coordsDimension) {
-		if (isPearl() && NETHER.equals(dimension) && coordsDimension != null && !NETHER.equals(coordsDimension)) return null;
-		return dimension;
+	// a nether cannon aimed with coordinates from another dimension
+	public boolean converts(String coordsDimension) {
+		return NETHER.equals(dimension) && coordsDimension != null && !NETHER.equals(coordsDimension);
 	}
 
 	public AABB operatorArea() {

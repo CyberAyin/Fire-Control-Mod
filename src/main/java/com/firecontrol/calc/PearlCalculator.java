@@ -50,8 +50,9 @@ public final class PearlCalculator {
 		public final double landX, landZ;
 		public final double error;
 		public final double flightTicks;
+		public final int farJumps;
 
-		Solution(Axis axisA, Axis axisB, int chargesA, int chargesB, int targetX, int targetZ, double landX, double landZ, double error, double flightTicks) {
+		Solution(Axis axisA, Axis axisB, int chargesA, int chargesB, int targetX, int targetZ, double landX, double landZ, double error, double flightTicks, int farJumps) {
 			this.axisA = axisA;
 			this.axisB = axisB;
 			this.chargesA = chargesA;
@@ -62,6 +63,7 @@ public final class PearlCalculator {
 			this.landZ = landZ;
 			this.error = error;
 			this.flightTicks = flightTicks;
+			this.farJumps = farJumps;
 		}
 
 		public int total() {
@@ -88,19 +90,39 @@ public final class PearlCalculator {
 		int nB = nTotal - nA;
 
 		double mN = nTotal > 0 ? capacity(nTotal, launchY, targetY) / nTotal : 0;
-		double landX = originX + (nA * chosen.axisA.ux + nB * chosen.axisB.ux) * mN;
-		double landZ = originZ + (nA * chosen.axisA.uz + nB * chosen.axisB.uz) * mN;
+		double vx = nA * chosen.axisA.ux + nB * chosen.axisB.ux, vz = nA * chosen.axisA.uz + nB * chosen.axisB.uz;
+		double landX = originX + vx * mN;
+		double landZ = originZ + vz * mN;
 		double err = netherConversion ? Math.hypot(landX * 8 - targetX, landZ * 8 - targetZ) : Math.hypot(landX - targetX, landZ - targetZ);
-		return new Solution(chosen.axisA, chosen.axisB, nA, nB, tx, tz, landX, landZ, err, flightTime(nTotal, launchY, targetY));
+		double flight = flightTime(nTotal, launchY, targetY);
+		return new Solution(chosen.axisA, chosen.axisB, nA, nB, tx, tz, landX, landZ, err, flight, farJumps(originX, originZ, vx, vz, flight));
 	}
 
+	// x, z, flight ticks, far chunk jumps
 	public static double[] landing(int originX, int floorY, int originZ, int targetY, int north, int east, int south, int west) {
 		double launchY = floorY + DETONATION_Y_OFFSET;
 		int total = north + east + south + west;
 		double mN = total > 0 ? capacity(total, launchY, targetY) / total : 0;
 		double vx = north * Axis.NORTH.ux + east * Axis.EAST.ux + south * Axis.SOUTH.ux + west * Axis.WEST.ux;
 		double vz = north * Axis.NORTH.uz + east * Axis.EAST.uz + south * Axis.SOUTH.uz + west * Axis.WEST.uz;
-		return new double[] {originX + vx * mN, originZ + vz * mN, flightTime(total, launchY, targetY)};
+		double flight = flightTime(total, launchY, targetY);
+		return new double[] {originX + vx * mN, originZ + vz * mN, flight, farJumps(originX, originZ, vx, vz, flight)};
+	}
+
+	// A flying pearl keeps the chunks within 2 of it loaded. A tick that takes it further lands it in a chunk
+	// the server still has to load, and the pearl waits for it, so long shots take longer than their flight.
+	static int farJumps(int originX, int originZ, double vx, double vz, double flight) {
+		double x = originX + 0.5, z = originZ + 0.5, drag = 1;
+		int jumps = 0;
+		for (int i = 0; i < flight; i++) {
+			double nx = x + vx * drag, nz = z + vz * drag;
+			if (Math.max(Math.abs(Math.floorDiv((int) Math.floor(nx), 16) - Math.floorDiv((int) Math.floor(x), 16)),
+					Math.abs(Math.floorDiv((int) Math.floor(nz), 16) - Math.floorDiv((int) Math.floor(z), 16))) > 2) jumps++;
+			x = nx;
+			z = nz;
+			drag *= DRAG;
+		}
+		return jumps;
 	}
 
 	public static double loadTicks(int charges) {

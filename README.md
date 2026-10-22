@@ -44,20 +44,24 @@ The passcode is read when you pair at the cannon. If you used `pair at` from far
 
 1. Run `/firecontrol pair` in front of the cannon's buttons.
 2. Run `/firecontrol target <x> <z>`, or `/firecontrol target` while standing on the spot. Overworld coordinates are converted for a cannon in the Nether.
-3. Click **[Load it for me]**. It switches the bulbs and moves the right number of counter items into the INPUT, one axis at a time. You need one free inventory slot for every 64 items.
+3. Click **[Load it for me]**. It switches the bulbs and moves the right number of counter items into the INPUT, one axis at a time. Big loads go in batches of 64 items per free inventory slot.
 4. When the hole opens, step in and throw your pearl straight up.
 
 The buttons show how many charges are loaded and how many are needed. If the cannon still has charges from another shot, the mod tells you where they'd send you instead of loading on top of them.
+
+If you walk off, open a menu or get hurt, loading pauses and **[Resume]** carries on. The cannon keeps working on what it already has, and the time left keeps counting while it does.
+
+On long shots the pearl has to wait for the server to load the chunks on its way, so the landing countdown includes that. It learns how fast your server is from each landing, and shows **Landing…** until you're actually there.
 
 ## Targets without a Y
 
 Leave the Y out (`/firecontrol target 1200 -3400`) and the mod uses the ground height there:
 
-- in loaded chunks it uses the actual top block
+- in loaded chunks it uses the actual blocks
 - in singleplayer it asks the world generator
-- on a server it needs the world seed, which you can enter under **More... > World seed**
+- on a server it needs the world seed, which you can enter under **More... > World seed**. One seed covers the Overworld, the Nether and the End, and it's checked against the terrain around you in whichever one you're in.
 
-This doesn't work in the Nether or on worlds with custom terrain, so type the Y there.
+The Nether has several floors: a pearl lands on the one closest to the cannon's own height (the roof for a cannon on top of it), and a strike from the sky lands on the roof. Worked-out heights are the bare terrain without builds, trees or Nether fungi. Worlds with custom terrain need the Y typed in.
 
 ## Commands
 

@@ -113,9 +113,12 @@ public final class MoreScreen extends Screen {
 			seedBox.setValue(seed == null ? "" : seed.text);
 			seedBox.setHint(Component.literal("lets you leave a target's Y empty").withStyle(ChatFormatting.DARK_GRAY));
 			seedBox.setTooltip(Tooltip.create(Component.literal("The server's world seed (/seed shows it if you're allowed to use it, otherwise ask an admin)."
-					+ " With it, FireControl works out the ground height at any X Z, so a target needs no Y. It's checked against the ground loaded around you.")));
+					+ " One seed covers the Overworld, the Nether and the End. With it, FireControl works out the ground height at any X Z,"
+					+ " so a target needs no Y. It's checked against the terrain loaded around you, in whichever of them you're in.")));
 			seedBox.setResponder(this::seedTyped);
-			if (seed != null && seed.matched == null) seedTypedTicks = 19;
+			// a seed confirmed in the Nether or the End doesn't tell which overworld terrain the server uses
+			boolean overworld = minecraft.level != null && "minecraft:overworld".equals(FireControl.dimensionId(minecraft.level));
+			if (seed != null && (seed.matched == null || overworld && Boolean.TRUE.equals(seed.matched) && seed.terrain == null)) seedTypedTicks = 19;
 		}
 		addRenderableWidget(seedBox);
 		row += 24;
@@ -253,7 +256,7 @@ public final class MoreScreen extends Screen {
 			Store.Seed now = Store.seed();
 			if (now == null || !text.equals(now.text)) return;
 			if (c.match() != null) now.matched = c.match();
-			if (Boolean.TRUE.equals(c.match())) now.terrain = c.preset();
+			if (Boolean.TRUE.equals(c.match()) && c.preset() != null) now.terrain = c.preset();
 			Store.save();
 			GroundHeight.forget();
 			say(c.message(), Boolean.TRUE.equals(c.match()) ? ChatFormatting.GREEN : c.match() == null ? ChatFormatting.YELLOW : ChatFormatting.RED);
