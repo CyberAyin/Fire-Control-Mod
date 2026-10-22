@@ -57,6 +57,11 @@ public final class Eta {
 		return p.isPearl() && !p.etaLanded;
 	}
 
+	// a dimension change moves you much further than a landing; don't read it as one
+	public static void onLevelChange() {
+		lastPos = null;
+	}
+
 	public static void landed(Pairing p, long gameTime) {
 		p.etaTotalTicks = (int) (gameTime - p.etaStart);
 		p.etaLanded = true;

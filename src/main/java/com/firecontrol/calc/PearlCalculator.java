@@ -14,11 +14,9 @@ public final class PearlCalculator {
 	private static final double MAG = 0.8478107958208771;
 	private static final double DRIFT = 0.031777016335115336;
 
-	// load time per axis, from the calculator
-	private static final double GEN_PRIMING_TICKS = 82;
-	private static final double GEN_ALIGN_TICKS = 150;
-	private static final double GEN_RATE = 8.5201;
-	private static final double GEN_BASE = 13.06;
+	// load time per axis, from the calculator: priming + aligning + a base, then a rate per charge
+	public static final double LOAD_FIXED_TICKS = 82 + 150 + 13.06;
+	public static final double LOAD_TICKS_PER_CHARGE = 8.5201;
 
 	private PearlCalculator() {
 	}
@@ -126,7 +124,12 @@ public final class PearlCalculator {
 	}
 
 	public static double loadTicks(int charges) {
-		return charges <= 0 ? 0 : GEN_PRIMING_TICKS + GEN_ALIGN_TICKS + (GEN_RATE * charges + GEN_BASE);
+		return loadTicks(charges, LOAD_TICKS_PER_CHARGE);
+	}
+
+	// a cannon that runs slower (or faster) than the calculator's rate
+	public static double loadTicks(int charges, double ticksPerCharge) {
+		return charges <= 0 ? 0 : LOAD_FIXED_TICKS + ticksPerCharge * charges;
 	}
 
 	private record Choice(Axis axisA, Axis axisB, double a, double b) {

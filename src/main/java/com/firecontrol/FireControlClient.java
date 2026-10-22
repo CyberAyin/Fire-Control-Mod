@@ -32,6 +32,7 @@ public class FireControlClient implements ClientModInitializer {
 		Compat.onLevelChange(() -> {
 			AutoInput.stop(null);
 			PearlLoader.stop(null);
+			Eta.onLevelChange();
 			FireControl.invalidate();
 			GroundHeight.onLevelChange();
 		});

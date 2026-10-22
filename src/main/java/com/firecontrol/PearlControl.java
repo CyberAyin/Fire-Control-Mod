@@ -197,6 +197,7 @@ public final class PearlControl {
 			countedPearl = e.getId();
 			int[] c = stackedByLabel();
 			double[] land = landingFor(p, c);
+			warnIfShort(p, land);
 			Eta.startTicks(p, etaTicks(land[2], land[3]), IN_CANNON_TICKS, level.getGameTime());
 			thrownFor = p;
 			thrownFlight = land[2];
@@ -208,6 +209,20 @@ public final class PearlControl {
 			Store.save();
 			return;
 		}
+	}
+
+	// The cannon fires with whatever is in its stacks, so a pearl thrown mid-load goes a long way wrong.
+	// Nothing can hold it back once it is in the air; say where it is really going.
+	private static void warnIfShort(Pairing p, double[] land) {
+		if (solution == null || matchesSolution()) return;
+		java.util.List<String> off = new java.util.ArrayList<>();
+		for (Axis world : Axis.values()) {
+			Axis label = p.pearl.labelFor(world);
+			if (stacked(label) != solution.charges(world)) off.add(label.label + " " + stacked(label) + "/" + solution.charges(world));
+		}
+		if (PearlLoader.running() || PearlLoader.paused()) PearlLoader.stop(null);
+		Msg.error("Thrown before the cannon was loaded: " + String.join(", ", off) + ".");
+		Msg.warn(String.format("That pearl lands near %.0f %.0f, not %d %d.", land[0], land[1], solution.targetX, solution.targetZ));
 	}
 
 	public static boolean startCountdown(Pairing p, long gameTime) {
@@ -308,8 +323,13 @@ public final class PearlControl {
 	}
 
 	public static boolean ready() {
+		return matchesSolution() && holeOpen && !pairing.fired;
+	}
+
+	// the stacks hold exactly this target's charges. Anything else and a pearl thrown now lands somewhere else.
+	public static boolean matchesSolution() {
 		Pairing p = pairing;
-		if (p == null || solution == null || !known() || !holeOpen || p.fired) return false;
+		if (p == null || solution == null || !known()) return false;
 		for (Axis world : Axis.values()) {
 			if (stacked(p.pearl.labelFor(world)) != solution.charges(world)) return false;
 		}

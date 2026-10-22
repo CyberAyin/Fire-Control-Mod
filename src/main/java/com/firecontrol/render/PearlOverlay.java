@@ -51,6 +51,10 @@ public final class PearlOverlay {
 			int stroke = ((int) (pulse * 255) << 24) | (READY & 0xFFFFFF);
 			Gizmos.cuboid(hole, GizmoStyle.strokeAndFill(stroke, 3f, ((int) (pulse * 80) << 24) | (READY & 0xFFFFFF))).setAlwaysOnTop();
 			Gizmos.billboardText("Step in · throw straight up", hole.getCenter().add(0, 1.1, 0), TextGizmo.Style.forColorAndCentered(READY).withScale(0.35f)).setAlwaysOnTop();
+		} else if (s != null && !p.fired && !PearlControl.matchesSolution() && (PearlLoader.running() || PearlLoader.paused() || PearlControl.stored() > 0)) {
+			// the cannon fires with whatever is in its stacks, so a pearl thrown now goes a long way wrong
+			Gizmos.cuboid(hole, GizmoStyle.strokeAndFill(0x90FF5050, 2f, 0x18FF5050)).setAlwaysOnTop();
+			Gizmos.billboardText("Not loaded yet · don't throw", hole.getCenter().add(0, 1.1, 0), TextGizmo.Style.forColorAndCentered(OVER).withScale(0.35f)).setAlwaysOnTop();
 		}
 
 		String label = statusLabel(p, s, ready);

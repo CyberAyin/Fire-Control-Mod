@@ -35,6 +35,8 @@ public final class Store {
 		public Map<String, Seed> seeds = new LinkedHashMap<>();
 		// per server: game ticks a flying pearl waits for each chunk it has to load, learned from landings
 		public Map<String, Double> chunkWait = new LinkedHashMap<>();
+		// per server: game ticks a pearl cannon takes per charge, learned from the batches it has run
+		public Map<String, Double> loadRate = new LinkedHashMap<>();
 	}
 
 	public static final class Seed {
@@ -64,6 +66,7 @@ public final class Store {
 			if (data.pending == null) data.pending = new LinkedHashMap<>();
 			if (data.seeds == null) data.seeds = new LinkedHashMap<>();
 			if (data.chunkWait == null) data.chunkWait = new LinkedHashMap<>();
+			if (data.loadRate == null) data.loadRate = new LinkedHashMap<>();
 		} catch (Exception e) {
 			LOG.error("[FireControl] Could not read {}", FILE, e);
 		}

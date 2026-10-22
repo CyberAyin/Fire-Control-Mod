@@ -75,6 +75,9 @@ public final class PearlLoader {
 	private static final List<Integer> carried = new ArrayList<>();
 	private static int carriedCount, inputBefore;
 	private static int stackedBefore, made, settled;
+	// elapsed ticks when the batch now running went into the INPUT
+	private static long batchStartElapsed;
+	private static double shownProgress;
 	private static long lastProgressAt, escapingSince = -1;
 	private static final int ESCAPE_TICKS = 40;
 	// container clicks: ticks since the last one, and tries
@@ -137,12 +140,66 @@ public final class PearlLoader {
 		return step.isEmpty() ? timeLeft() : step + " · " + timeLeft();
 	}
 
-	// clock based, eases toward full if the cannon takes longer
+	// how far along, against the time still to go rather than the plan, so a slow cannon stretches the bar
 	public static double progress() {
 		if (!running && !paused) return -1;
-		double partial = heldSince < 0 ? Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false) : 0;
-		double x = (elapsedTicks() + partial) / Math.max(1, expectedTicks);
-		return x < 0.85 ? x : 0.85 + 0.15 * (1 - Math.exp(-(x - 0.85) / 0.15));
+		if (heldSince >= 0) return shownProgress;
+		double elapsed = elapsedTicks() + Minecraft.getInstance().getDeltaTracker().getGameTimeDeltaPartialTick(false);
+		double x = elapsed / Math.max(1, elapsed + Math.max(0, ticksLeft()));
+		// a bar that slows down reads better than one that goes backwards
+		shownProgress = Math.max(shownProgress, Math.min(x, 0.99));
+		return shownProgress;
+	}
+
+	// ticks still to go. Once a batch is making charges this follows the rate it is really going at,
+	// so the clock stretches instead of running out.
+	private static long ticksLeft() {
+		long planned = expectedTicks - elapsedTicks();
+		if (phase != Phase.WAIT || job == null) return planned;
+		long since = elapsedTicks() - batchStartElapsed;
+		int done = Math.min(job.count, Math.max(made, settled));
+		long rest = queuedTicks();
+		if (done <= 0) return Math.max(planned, (long) plannedTicks(job.count) - since + rest);
+		double seen = Mth.clamp((since - PearlCalculator.LOAD_FIXED_TICKS) / done, 0.5 * ticksPerCharge(), 5 * ticksPerCharge());
+		// one early charge says little about the rest
+		double weight = Math.min(1, done / 16.0);
+		double rate = weight * seen + (1 - weight) * ticksPerCharge();
+		return Math.max(planned, Math.round((job.count - done) * rate) + rest);
+	}
+
+	// the batches queued behind this one
+	private static long queuedTicks() {
+		long t = 0;
+		for (Job j : jobs) t += (long) plannedTicks(j.count) + BATCH_TICKS + 2L * PRESS_TICKS;
+		return t;
+	}
+
+	// ticks per charge this cannon really takes here, learned from the batches it has run
+	private static double ticksPerCharge() {
+		Double r = Store.data().loadRate.get(Store.worldKey());
+		return r == null ? PearlCalculator.LOAD_TICKS_PER_CHARGE : r;
+	}
+
+	private static double plannedTicks(int charges) {
+		return PearlCalculator.loadTicks(charges, ticksPerCharge());
+	}
+
+	// a finished batch moves the rate, so the next estimate starts closer
+	private static void learnRate(int charges, long took) {
+		if (charges < 8) return;
+		double seen = (took - PearlCalculator.LOAD_FIXED_TICKS) / charges;
+		if (seen < 1 || seen > 60) return;
+		Store.data().loadRate.put(Store.worldKey(), 0.5 * ticksPerCharge() + 0.5 * seen);
+		Store.save();
+	}
+
+	// what the axis being loaded is meant to end up with, and what it has so far
+	private static int axisWant() {
+		return solution.charges(pairing.pearl.worldFor(job.label));
+	}
+
+	private static int axisHave() {
+		return Math.min(axisWant(), stackedBefore + Math.max(made, settled));
 	}
 
 	// the server's time packets can set the client's game time back a little
@@ -190,12 +247,13 @@ public final class PearlLoader {
 
 	public static String loadingProgress() {
 		if (loadingAxis() == null) return null;
-		return job.count + " · " + timeLeft();
+		return axisHave() + "/" + axisWant() + " · " + timeLeft();
 	}
 
 	public static String timeLeft() {
-		long left = expectedTicks - elapsedTicks();
-		if (left <= 0) return "almost done";
+		long left = ticksLeft();
+		// never "almost done" while an axis is still short: that is what makes people throw early
+		if (left <= 0) return phase == Phase.WAIT && job != null && missing(job.label) > 0 ? "still loading" : "almost done";
 		int sec = (int) Math.ceil(left / tps);
 		return sec / 60 + ":" + String.format("%02d", sec % 60) + " left";
 	}
@@ -262,7 +320,7 @@ public final class PearlLoader {
 			int need = s.charges(world) - PearlControl.stacked(label);
 			if (need > 0) {
 				jobs.add(new Job(label, need));
-				totalTicks += (int) PearlCalculator.loadTicks(need);
+				totalTicks += (int) plannedTicks(need);
 			}
 		}
 		if (jobs.isEmpty()) {
@@ -292,6 +350,7 @@ public final class PearlLoader {
 		heldTicks = 0;
 		heldSince = -1;
 		batchRetried = false;
+		shownProgress = 0;
 		pressedAxis = null;
 		waitingWall = null;
 		closedAt = -100;
@@ -864,6 +923,7 @@ public final class PearlLoader {
 		closedAt = ticks;
 		made = 0;
 		settled = 0;
+		batchStartElapsed = elapsedTicks();
 		setPhase(Phase.WAIT);
 		lastProgressAt = mc.level.getGameTime();
 	}
@@ -915,7 +975,7 @@ public final class PearlLoader {
 	// The cannon runs the items through before the first charge shows, about 8.5 ticks each:
 	// over a minute for a big batch.
 	private static long firstChargeTicks(int count) {
-		return (long) PearlCalculator.loadTicks(count);
+		return (long) plannedTicks(count);
 	}
 
 	// in the cannon but in no stack: still up top, on their way, or stuck
@@ -928,12 +988,12 @@ public final class PearlLoader {
 	private static void waitForCharges(ClientLevel level) {
 		if (phaseTicks % 5 != 0) return;
 		int inStack = countCharges(level);
-		// charges arrive in bursts, so the HUD uses the time based bar instead of a count
-		say("Loading " + job.label.label, job.count + " charge" + (job.count == 1 ? "" : "s"));
+		say("Loading " + job.label.label, axisHave() + "/" + axisWant() + " charges");
 		// in game time, so a lagging server gets the same time
 		long quiet = level.getGameTime() - lastProgressAt;
 		// the cannon doesn't always make one charge per item, so let any still on their way arrive before switching
 		if (inStack >= job.count && (loose() == 0 || quiet > BATCH_DONE_TICKS)) {
+			learnRate(job.count, elapsedTicks() - batchStartElapsed - quiet);
 			batchRetried = false;
 			nextJob();
 			return;
@@ -957,7 +1017,7 @@ public final class PearlLoader {
 		if (quiet > stall && made == 0 && !batchRetried) {
 			batchRetried = true;
 			jobs.addFirst(new Job(job.label, job.count));
-			expectedTicks += (int) PearlCalculator.loadTicks(job.count) + BATCH_TICKS;
+			expectedTicks += (int) plannedTicks(job.count) + BATCH_TICKS;
 			nextJob();
 			return;
 		}
@@ -985,7 +1045,7 @@ public final class PearlLoader {
 			int want = solution.charges(world), have = PearlControl.stacked(label);
 			if (have < want && topUps < MAX_TOP_UPS) {
 				jobs.add(new Job(label, want - have));
-				expectedTicks += (int) PearlCalculator.loadTicks(want - have) + 2 * PRESS_TICKS + BATCH_TICKS;
+				expectedTicks += (int) plannedTicks(want - have) + 2 * PRESS_TICKS + BATCH_TICKS;
 				toppedUp = true;
 			} else if (have != want) {
 				extra.add(label.label + " " + have + "/" + want);
